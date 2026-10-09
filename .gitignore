@@ -1,0 +1,3 @@
+# Datos de inquilinos: nunca se publican en el repositorio (viven en Google Drive)
+datos*.json
+*.xlsx
