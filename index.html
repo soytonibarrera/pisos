@@ -130,6 +130,10 @@ label.chk input{width:20px;height:20px;flex:none;padding:0}
 .frow b{flex:none;font-weight:600;font-variant-numeric:tabular-nums;text-align:right}
 .frow.tot b,.frow.tot span{font-weight:800}.frow.big{font-size:1rem}.frow.mut{color:var(--muted)}
 .avisos{margin-top:12px;padding:10px 12px;border-radius:12px;background:var(--free-bg);color:var(--free);font-size:.82rem;font-weight:600;display:grid;gap:6px}
+.rep{padding:6px 0 12px;border-top:1px solid var(--line)}.rep .frow{border-top:0}
+.desg{color:var(--muted);font-size:.8rem;margin-top:-4px}
+.repc{display:flex;gap:10px;align-items:center;margin-top:8px}.repc label{margin:0;flex:1;font-size:.82rem}.repc input[type=number]{width:110px;padding:9px 10px}
+.rep .acts a{font-size:.85rem;padding:9px}
 [hidden]{display:none!important}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -153,7 +157,7 @@ label.chk input{width:20px;height:20px;flex:none;padding:0}
   <div id="list"></div>
   <div class="status" id="status">Cargando…</div>
 </div>
-<nav class="nav"><button type="button" data-v="cobros">Cobros</button><button type="button" data-v="gastos">Gastos</button><button type="button" data-v="hacienda">Hacienda</button></nav>
+<nav class="nav"><button type="button" data-v="cobros">Cobros</button><button type="button" data-v="gastos">Gastos</button><button type="button" data-v="reparto">Reparto</button><button type="button" data-v="hacienda">Hacienda</button></nav>
 <dialog id="dlg"><form method="dialog" class="sheet" id="form"></form></dialog>
 
 <script>
@@ -165,7 +169,7 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const COLORS=['#3D6BFF','#8B5CF6','#EC4899','#F97316','#14B8A6','#0EA5E9','#84CC16','#EAB308'];
 const color=s=>{let h=0;for(const c of String(s))h=(h*31+c.charCodeAt(0))|0;return COLORS[Math.abs(h)%COLORS.length];};
 const initials=s=>String(s||'?').split(/\s+/).filter(w=>w.length>1&&!/^(y|su|de|la)$/i.test(w)).slice(0,2).map(w=>w[0].toUpperCase()).join('')||'?';
-let pisos=[],filtro='todos',vista='cobros';const LS='habitaciones-pisos';
+let pisos=[],filtro='todos',vista='cobros',ajustes={titular:'',iban:''};const LS='habitaciones-pisos';
 let cur=new Date();cur.setDate(1);
 const iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 const hoy=()=>iso(new Date());
@@ -223,7 +227,7 @@ const visibles=()=>ord(pisos).filter(p=>filtro==='todos'||filtro==='pend'||p.id=
 
 function render(){
   document.querySelectorAll('.nav button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===vista));
-  if(vista==='gastos')renderGastos();else if(vista==='hacienda')renderHacienda();else renderCobros();
+  if(vista==='gastos')renderGastos();else if(vista==='reparto')renderReparto();else if(vista==='hacienda')renderHacienda();else renderCobros();
 }
 
 /* ---------- Cobros ---------- */
@@ -486,6 +490,102 @@ function exportCsv(){
   a.download='hacienda-'+Y+'.csv';document.body.appendChild(a);a.click();a.remove();
 }
 
+
+/* ---------- Reparto de gastos y mensajes de cobro ---------- */
+// Ciclo: gastos del mes elegido + alquiler del mes siguiente. Reparto por persona y días de estancia.
+const MESES=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+const nombreMes=mk=>MESES[Number(mk.slice(5,7))-1];
+const sigMes=mk=>{const d=new Date(mk+'-01T12:00');d.setMonth(d.getMonth()+1);return mkey(d);};
+const eur2=n=>(Number(n)||0).toLocaleString('es-ES',{minimumFractionDigits:2,maximumFractionDigits:2})+' €';
+const NOMBRE_GASTO={Electricidad:'luz',Gas:'gas',Agua:'agua',Internet:'internet'};
+let repEx={}; // ajustes de esta sesión por inquilino y mes: {fuera, extra}
+function reparto(p,mk){
+  const nx=sigMes(mk),a=mk+'-01',b=mfin(mk);
+  const gs=p.gastos.filter(g=>g.mes===mk&&g.rep).sort((x,y)=>(x.fecha||'').localeCompare(y.fecha||''));
+  const tg=num(gs.reduce((s,g)=>s+total(g),0));
+  const filas=[];
+  ord(p.habitaciones).forEach(h=>h.estancias.forEach(e=>{
+    const enM=activa(e,mk,h),enN=activa(e,nx,h);if(!enM&&!enN)return;
+    const x=repEx[e.id+'|'+mk]||{},dd=enM?solape(e,a,b):0;
+    filas.push({h,e,dd,peso:x.fuera?0:(Number(e.personas)||1)*dd,alq:enN?esperado(e,nx):0,extra:num(x.extra),fuera:!!x.fuera});}));
+  const tp=filas.reduce((s,f)=>s+f.peso,0);
+  filas.forEach(f=>{f.parte=tp?num(tg*f.peso/tp):0;});
+  if(tp){const dif=num(tg-filas.reduce((s,f)=>s+f.parte,0));if(dif){const f=[...filas].sort((x,y)=>y.peso-x.peso)[0];f.parte=num(f.parte+dif);}}
+  filas.forEach(f=>{f.total=num(f.parte+f.alq+f.extra);});
+  return {gs,tg,filas,tp,nx,porPersona:tp?num(tg*dim(mk)/tp):0};
+}
+function mensaje(p,r,f,mk){
+  const M=nombreMes(mk),N=nombreMes(r.nx),n=Number(f.e.personas)||1,pl=n>1,full=f.dd>=dim(mk);
+  const L=[`Hola ${f.e.inquilino} 👋`,'',`${pl?'Os':'Te'} paso el cobro de ${f.h.nombre.toLowerCase()} en ${p.direccion||p.nombre}:`,''];
+  if(f.alq)L.push(`• Alquiler de ${N}: ${eur2(f.alq)}`+(f.alq!==num(f.e.precio)?' (parte proporcional)':''));
+  if(f.parte)L.push(`• Gastos de ${M}: ${eur2(f.parte)}`+(pl||!full?` (${pl?n+' personas':'1 persona'}${full?'':', '+f.dd+' días'})`:''));
+  if(f.extra)L.push(`• ${f.extra>0?'Otros pendientes':'Descuento'}: ${eur2(f.extra)}`);
+  L.push(`• TOTAL: ${eur2(f.total)}`);
+  if(f.parte){L.push('',`Gastos del piso de ${M}: `+r.gs.map(g=>(NOMBRE_GASTO[g.cat]||g.cat.toLowerCase())+' '+eur2(total(g))).join(' + ')+` = ${eur2(r.tg)}, repartidos por persona y días de estancia`+(pl?`; al ser ${n} personas, ${pl?'os':'te'} corresponden ${n} partes.`:'.'));}
+  L.push('','Ingreso a:');
+  if(ajustes.titular)L.push(`• Titular: ${ajustes.titular}`);
+  if(ajustes.iban)L.push(`• IBAN: ${ajustes.iban}`);
+  L.push(`• Concepto: ${f.e.inquilino} · `+[f.parte||f.extra?`Gastos de ${M}`:'',f.alq?`Alquiler de ${N}`:''].filter(Boolean).join(' y '));
+  L.push('',`Cualquier duda me ${pl?'decís':'dices'}. ¡Gracias!`);
+  return L.join('\n');
+}
+function renderReparto(){
+  const mk=mkey(cur),N=nombreMes(sigMes(mk));
+  $('#mlabel').textContent='Gastos de '+nombreMes(mk)+' '+mk.slice(0,4);
+  if(filtro==='pend')filtro='todos';
+  chips([]);
+  const rs=visibles().map(p=>({p,r:reparto(p,mk)}));
+  const T=k=>num(rs.reduce((s,x)=>s+x.r.filas.reduce((a,f)=>a+f[k],0),0));
+  hero(eur(T('total')),'a cobrar: gastos de '+nombreMes(mk)+' + alquiler de '+N,null,[[eur(T('parte')),'gastos repartidos'],[eur(T('alq')),'alquileres'],[rs.reduce((s,x)=>s+x.r.filas.length,0),'inquilinos']]);
+  if(!pisos.length){$('#list').innerHTML='<div class="empty group">Añade primero un piso.</div>';return;}
+  const aviso=ajustes.iban?'':'<div class="avisos group"><div>⚠ Añade tu titular e IBAN para que salgan en los mensajes.</div></div>';
+  $('#list').innerHTML=aviso+rs.map(({p,r})=>{if(!r.filas.length)return '';
+    return `<div class="group"><div class="ghead"><div><h2>${esc(p.nombre)}</h2><small>Gastos de ${nombreMes(mk)}: ${eur(r.tg)}${r.tp?' · '+eur(r.porPersona)+' por persona (mes completo)':''}</small></div></div>
+    <div class="list fis">${r.gs.length?r.gs.map(g=>`<div class="frow"><span>${esc(g.cat)}${g.prov?' · '+esc(g.prov):''}<small>${g.desde&&g.hasta?fdate(g.desde)+' → '+fdate(g.hasta):esc(g.nfact||'')}</small></span><b>${eur(total(g))}</b></div>`).join('')
+      :`<div class="frow mut"><span>Sin gastos que repartir en ${nombreMes(mk)}</span><b>—</b></div>`}
+    <h4>Cobro por inquilino</h4>
+    ${r.filas.map(f=>{const k=f.e.id+'|'+mk,n=Number(f.e.personas)||1;
+      return `<div class="rep"><div class="frow tot"><span>${esc(f.e.inquilino)}<small>${esc(f.h.nombre)} · ${n} ${n>1?'personas':'persona'} · ${f.dd?f.dd+' de '+dim(mk)+' días':'entra en '+N}</small></span><b>${eur(f.total)}</b></div>
+        <div class="desg">Alquiler ${N} ${eur(f.alq)} + gastos ${eur(f.parte)}${f.extra?' + otros '+eur(f.extra):''}</div>
+        <div class="repc"><label class="chk"><input type="checkbox" data-fuera="${k}"${f.fuera?' checked':''}> No reparte gastos</label>
+        <input type="number" inputmode="decimal" data-extra="${k}" placeholder="Otros €" value="${f.extra||''}" aria-label="Otros importes pendientes"></div>
+        <div class="acts"><a href="#" data-msg="${p.id}|${f.e.id}">Ver mensaje</a><a href="#" data-copy="${p.id}|${f.e.id}">Copiar</a><a href="#" data-wa="${p.id}|${f.e.id}">WhatsApp</a></div></div>`;}).join('')}
+    </div></div>`;}).join('')+
+    `<button type="button" class="addpiso" data-act="ajustes">Datos de cobro (titular e IBAN)</button>`;
+}
+function buscaFila(pid,eid){const p=P(pid),mk=mkey(cur),r=reparto(p,mk),f=r.filas.find(x=>x.e.id===eid);return {p,r,f,mk,txt:f?mensaje(p,r,f,mk):''};}
+async function copiar(t){try{await navigator.clipboard.writeText(t);return true;}catch(e){const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();let ok=false;try{ok=document.execCommand('copy');}catch(_){}a.remove();return ok;}}
+function waLink(e,t){const tel=String(e.telefono||'').replace(/\D/g,''),n=tel.length===9?'34'+tel:tel;return 'https://wa.me/'+(n||'')+'?text='+encodeURIComponent(t);}
+function verMensaje(pid,eid){const {f,txt}=buscaFila(pid,eid);if(!f)return;
+  $('#form').innerHTML=`<div class="grab"></div><h3>${esc(f.e.inquilino)}</h3><div class="hint">${esc(f.h.nombre)} · total ${eur(f.total)}</div>
+    <textarea id="msg" style="min-height:320px;margin-top:10px">${esc(txt)}</textarea>
+    <div class="hint">Puedes retocar el texto antes de copiarlo o enviarlo.</div>
+    <div class="btns"><button type="button" class="btn" id="cp">Copiar</button><a class="btn main" id="wa" href="#" target="_blank" rel="noopener" style="text-align:center;text-decoration:none">WhatsApp</a></div>
+    <button class="del" style="color:var(--muted)" value="cancel">Cerrar</button>`;
+  $('#cp').onclick=async()=>{$('#cp').textContent=await copiar($('#msg').value)?'Copiado ✓':'No se pudo copiar';};
+  $('#wa').onclick=ev=>{$('#wa').href=waLink(f.e,$('#msg').value);};
+  $('#dlg').showModal();
+}
+function openAjustes(){
+  $('#form').innerHTML=`<div class="grab"></div><h3>Datos de cobro</h3><div class="hint">Salen en los mensajes de cobro. Se guardan en tu Drive, no en la web.</div>
+    <label for="a-t">Titular de la cuenta</label><input id="a-t" value="${esc(ajustes.titular||'')}">
+    <label for="a-i">IBAN</label><input id="a-i" value="${esc(ajustes.iban||'')}" autocapitalize="characters">
+    <div class="btns"><button class="btn" value="cancel">Cancelar</button><button class="btn main" id="ok">Guardar</button></div>`;
+  $('#ok').onclick=ev=>{ev.preventDefault();ajustes={titular:$('#a-t').value.trim(),iban:$('#a-i').value.trim().toUpperCase()};$('#dlg').close();render();save();};
+  $('#dlg').showModal();
+}
+document.addEventListener('change',e=>{const t=e.target;
+  if(t.dataset.fuera){const x=repEx[t.dataset.fuera]=repEx[t.dataset.fuera]||{};x.fuera=t.checked;render();}
+  else if(t.dataset.extra){const x=repEx[t.dataset.extra]=repEx[t.dataset.extra]||{};x.extra=Number(t.value)||0;render();}
+});
+document.addEventListener('click',async e=>{const t=e.target.closest('[data-msg],[data-copy],[data-wa]');if(!t)return;e.preventDefault();
+  const [pid,eid]=(t.dataset.msg||t.dataset.copy||t.dataset.wa).split('|');
+  if(t.dataset.msg)return verMensaje(pid,eid);
+  const {f,txt}=buscaFila(pid,eid);if(!f)return;
+  if(t.dataset.copy){t.textContent=await copiar(txt)?'Copiado ✓':'Error';setTimeout(()=>{t.textContent='Copiar';},1500);}
+  else window.open(waLink(f.e,txt),'_blank','noopener');
+});
+
 /* ---------- Google Drive ---------- */
 const CLIENT_ID='563196788827-cmafmda4reqtquqqsvou7h6ousjthnnk.apps.googleusercontent.com';
 const SCOPE='https://www.googleapis.com/auth/drive';
@@ -552,13 +652,13 @@ async function connect(){
   if(d.length){
     dataId=d[0].id;
     if(dirty)await push();
-    else{const j=await(await g('files/'+dataId+'?alt=media')).json();pisos=normalize(Array.isArray(j)?j:(j.pisos||[]));cache();}
+    else{const j=await(await g('files/'+dataId+'?alt=media')).json();pisos=normalize(Array.isArray(j)?j:(j.pisos||[]));if(j.ajustes)ajustes=j.ajustes;cache();}
   }else await push();
   renderBar();render();status('Sincronizado con Google Drive');
 }
-function cache(){try{localStorage.setItem(LS,JSON.stringify(pisos))}catch(e){}}
+function cache(){try{localStorage.setItem(LS,JSON.stringify(pisos));localStorage.setItem(LS+'-aj',JSON.stringify(ajustes))}catch(e){}}
 async function push(){
-  const body=JSON.stringify({version:2,actualizado:new Date().toISOString(),pisos},null,1);
+  const body=JSON.stringify({version:2,actualizado:new Date().toISOString(),ajustes,pisos},null,1);
   if(dataId)await g('https://www.googleapis.com/upload/drive/v3/files/'+dataId+'?uploadType=media',{method:'PATCH',headers:{'Content-Type':'application/json'},body});
   else dataId=(await upload(new File([body],DATA_NAME,{type:'application/json'}),rootId)).id;
   dirty=false;try{localStorage.removeItem(LS+'-dirty')}catch(e){}
@@ -599,7 +699,7 @@ async function importar(file){
   try{const j=JSON.parse(await file.text());const arr=Array.isArray(j)?j:j.pisos;
     if(!Array.isArray(arr)||arr.some(p=>!p||!p.id||!p.nombre))throw new Error('El archivo no tiene el formato esperado');
     if(pisos.length&&!confirm('Esto sustituye los '+pisos.length+' pisos actuales por los '+arr.length+' del archivo. ¿Continuar?'))return;
-    pisos=normalize(arr);render();save();
+    pisos=normalize(arr);if(j.ajustes&&j.ajustes.iban)ajustes=j.ajustes;render();save();
   }catch(er){alert('No se pudo importar: '+er.message);}
 }
 
@@ -614,6 +714,7 @@ document.addEventListener('click',e=>{
     else if(a==='docs'){path=[{id:rootId,name:'Documentos'}];showDocs();}
     else if(a==='piso')openPiso();
     else if(a==='csv')exportCsv();
+    else if(a==='ajustes')openAjustes();
     return;}
   if(d.folder){path.push({id:d.folder,name:d.name});showDocs();return;}
   if(d.crumb){path=path.slice(0,Number(d.crumb)+1);showDocs();return;}
@@ -630,7 +731,7 @@ const paso=n=>{cur.setMonth(cur.getMonth()+n*(vista==='hacienda'?12:1));render()
 $('#prev').onclick=()=>paso(-1);
 $('#next').onclick=()=>paso(1);
 $('#imp').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)importar(f);};
-try{pisos=normalize(JSON.parse(localStorage.getItem(LS)||'[]'));dirty=!!localStorage.getItem(LS+'-dirty');}catch(e){pisos=[];}
+try{pisos=normalize(JSON.parse(localStorage.getItem(LS)||'[]'));ajustes=JSON.parse(localStorage.getItem(LS+'-aj')||'null')||ajustes;dirty=!!localStorage.getItem(LS+'-dirty');}catch(e){pisos=[];}
 try{const s=JSON.parse(localStorage.getItem(TK)||'null');if(s&&s.tokenExp>Date.now()){token=s.token;tokenExp=s.tokenExp;}}catch(e){}
 render();renderBar();
 if(signed())connect().catch(er=>{renderBar();status(er.message);});
